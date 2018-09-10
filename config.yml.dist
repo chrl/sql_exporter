@@ -1,0 +1,18 @@
+listen: ":7090"
+databases:
+  live:
+    host: localhost
+    port: 3306
+    user: myuser
+    pass: mypass
+    database: mydatabase
+
+metrics:
+  myapp_users:
+    db: live
+    sql: select count(*) from users
+    ttl: 60
+  myapp_products:
+    db: live
+    sql: select count(*) from products
+    ttl: 600
