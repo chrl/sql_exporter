@@ -119,4 +119,3 @@ func main() {
 	log.Println("Listening for prometheus on " + c.Listen + "/metrics")
 	log.Fatal(http.ListenAndServe(c.Listen, nil))
 }
-
