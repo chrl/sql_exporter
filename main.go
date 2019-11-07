@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -35,8 +36,10 @@ type Config struct {
 
 // Measurement represents single measurement
 type Measurement struct {
-	value    string
-	executed time.Time
+	value     string
+	executed  time.Time
+	groups    map[string]string
+	paramname string
 }
 
 func (c *Config) getConfig() *Config {
@@ -86,7 +89,8 @@ func main() {
 	for metricName := range c.Metrics {
 		metrics[metricName] = Measurement{
 			value:    "0",
-			executed: time.Now(),
+			groups:   map[string]string{},
+			executed: time.Unix(0, 0),
 		}
 	}
 
@@ -96,24 +100,69 @@ func main() {
 
 		for metricName, metricConfig := range c.Metrics {
 
+			cl := []string{}
+
 			duration, _ := time.ParseDuration(metricConfig.TTL + "s")
 			if time.Now().Unix() > metrics[metricName].executed.Add(duration).Unix() {
 				log.Println("Recalculating " + metricName)
 
-				row := connectionPool[metricConfig.Db].QueryRow(metricConfig.SQL)
-				value := metrics[metricName].value
-				err := row.Scan(&value)
-				if err != nil {
-					log.Println("Error getting value: ", err.Error())
-					value = metrics[metricName].value
+				if strings.Contains(metricConfig.SQL, "group") {
+					rows, err := connectionPool[metricConfig.Db].Query(metricConfig.SQL)
+					if err != nil {
+						log.Println("Error getting value: ", err.Error())
+					} else {
+
+						cl, err = rows.Columns()
+						if err != nil {
+							log.Println("Error getting columns: ", err.Error())
+						}
+						mt := Measurement{
+							value:     metrics[metricName].value,
+							executed:  time.Now(),
+							groups:    map[string]string{},
+							paramname: cl[0],
+						}
+
+						for rows.Next() {
+							var param string
+							var vt string
+
+							if err := rows.Scan(&param, &vt); err != nil {
+								log.Println("Failed getting row: " + err.Error())
+							} else {
+								mt.groups[param] = vt
+							}
+
+						}
+
+						metrics[metricName] = mt
+						_ = rows.Close()
+					}
+
+				} else {
+					row := connectionPool[metricConfig.Db].QueryRow(metricConfig.SQL)
+					value := metrics[metricName].value
+					err := row.Scan(&value)
+					if err != nil {
+						log.Println("Error getting value: ", err.Error())
+						value = metrics[metricName].value
+					}
+					metrics[metricName] = Measurement{
+						value:    value,
+						executed: time.Now(),
+					}
 				}
-				metrics[metricName] = Measurement{
-					value:    value,
-					executed: time.Now(),
-				}
+
 			}
 
-			fmt.Fprintf(w, "# TYPE %s gauge\n%s{database=\"%s\"} %s\n", metricName, metricName, metricConfig.Db, string(metrics[metricName].value))
+			if len(metrics[metricName].groups) > 0 {
+				fmt.Fprintf(w, "# TYPE %s gauge\n", metricName)
+				for i, j := range metrics[metricName].groups {
+					fmt.Fprintf(w, "%s{%s=\"%s\",database=\"%s\"} %s\n", metricName, metrics[metricName].paramname, i, metricConfig.Db, j)
+				}
+			} else {
+				fmt.Fprintf(w, "# TYPE %s gauge\n%s{database=\"%s\"} %s\n", metricName, metricName, metricConfig.Db, string(metrics[metricName].value))
+			}
 		}
 	})
 	log.Println("Listening for prometheus on " + c.Listen + "/metrics")
