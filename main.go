@@ -36,10 +36,10 @@ type Config struct {
 
 // Measurement represents single measurement
 type Measurement struct {
-	value     string
-	executed  time.Time
-	groups    map[string]string
-	paramname string
+	value       string
+	executed    time.Time
+	params      []string
+	paramValues map[string]string
 }
 
 func (c *Config) getConfig() *Config {
@@ -68,7 +68,7 @@ func main() {
 
 	log.Println("Started SQL-Metric exporter")
 
-	metrics := map[string]Measurement{}
+	metrics := map[string][]Measurement{}
 
 	for dbname, Database := range c.Databases {
 		connectionString := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", Database.User, Database.Pass, Database.Host, Database.Port, Database.Database)
@@ -87,11 +87,10 @@ func main() {
 	}
 
 	for metricName := range c.Metrics {
-		metrics[metricName] = Measurement{
+		metrics[metricName] = []Measurement{{
 			value:    "0",
-			groups:   map[string]string{},
 			executed: time.Unix(0, 0),
-		}
+		}}
 	}
 
 	log.Println("All connections initialized")
@@ -103,7 +102,7 @@ func main() {
 			cl := []string{}
 
 			duration, _ := time.ParseDuration(metricConfig.TTL + "s")
-			if time.Now().Unix() > metrics[metricName].executed.Add(duration).Unix() {
+			if time.Now().Unix() > metrics[metricName][0].executed.Add(duration).Unix() {
 				log.Println("Recalculating " + metricName)
 
 				if strings.Contains(metricConfig.SQL, "group") {
@@ -116,38 +115,60 @@ func main() {
 						if err != nil {
 							log.Println("Error getting columns: ", err.Error())
 						}
-						mt := Measurement{
-							value:     metrics[metricName].value,
-							executed:  time.Now(),
-							groups:    map[string]string{},
-							paramname: cl[0],
+
+						var mtA []Measurement
+
+						// Result is your slice string.
+						rawResult := make([][]byte, len(cl))
+
+						dest := make([]interface{}, len(cl)) // A temporary interface{} slice
+						for i, _ := range rawResult {
+							dest[i] = &rawResult[i] // Put pointers to each string in the interface slice
 						}
 
 						for rows.Next() {
-							var param string
-							var vt string
-
-							if err := rows.Scan(&param, &vt); err != nil {
-								log.Println("Failed getting row: " + err.Error())
-							} else {
-								mt.groups[param] = vt
+							mt := Measurement{
+								value:       "",
+								executed:    time.Now(),
+								params:      cl[0 : len(cl)-1],
+								paramValues: map[string]string{},
 							}
+
+							err = rows.Scan(dest...)
+							if err != nil {
+								fmt.Println("Failed to scan row", err)
+								return
+							}
+
+							for i, raw := range rawResult {
+								if i != len(rawResult)-1 {
+									if raw == nil {
+										mt.paramValues[cl[i]] = "\\N"
+									} else {
+										mt.paramValues[cl[i]] = string(raw)
+									}
+								} else {
+									mt.value = string(raw)
+								}
+							}
+
+							mtA = append(mtA, mt)
 
 						}
 
-						metrics[metricName] = mt
+						metrics[metricName] = mtA
 						_ = rows.Close()
 					}
 
 				} else {
 					row := connectionPool[metricConfig.Db].QueryRow(metricConfig.SQL)
-					value := metrics[metricName].value
+					value := metrics[metricName][0].value
 					err := row.Scan(&value)
 					if err != nil {
 						log.Println("Error getting value: ", err.Error())
-						value = metrics[metricName].value
+						value = metrics[metricName][0].value
 					}
-					metrics[metricName] = Measurement{
+					metrics[metricName][0] = Measurement{
 						value:    value,
 						executed: time.Now(),
 					}
@@ -155,14 +176,15 @@ func main() {
 
 			}
 
-			if len(metrics[metricName].groups) > 0 {
-				fmt.Fprintf(w, "# TYPE %s gauge\n", metricName)
-				for i, j := range metrics[metricName].groups {
-					fmt.Fprintf(w, "%s{%s=\"%s\",database=\"%s\"} %s\n", metricName, metrics[metricName].paramname, i, metricConfig.Db, j)
+			fmt.Fprintf(w, "# TYPE %s gauge\n", metricName)
+			for _, j := range metrics[metricName] {
+				tags := ""
+				for gg, jd := range j.paramValues {
+					tags += gg + "=\"" + jd + "\","
 				}
-			} else {
-				fmt.Fprintf(w, "# TYPE %s gauge\n%s{database=\"%s\"} %s\n", metricName, metricName, metricConfig.Db, string(metrics[metricName].value))
+				fmt.Fprintf(w, "%s{%sdatabase=\"%s\"} %s\n", metricName, tags, metricConfig.Db, j.value)
 			}
+
 		}
 	})
 	log.Println("Listening for prometheus on " + c.Listen + "/metrics")
