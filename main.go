@@ -102,7 +102,7 @@ func main() {
 			cl := []string{}
 
 			duration, _ := time.ParseDuration(metricConfig.TTL + "s")
-			if time.Now().Unix() > metrics[metricName][0].executed.Add(duration).Unix() {
+			if len(metrics[metricName]) == 0 || time.Now().Unix() > metrics[metricName][0].executed.Add(duration).Unix() {
 				log.Println("Recalculating " + metricName)
 
 				if strings.Contains(metricConfig.SQL, "group") {
